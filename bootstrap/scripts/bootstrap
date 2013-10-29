@@ -1,0 +1,315 @@
+#!/bin/bash
+
+#set -e
+
+#SCRIPT_HOME=`dirname $0`
+SCRIPT_HOME=$(cd $(dirname $0);pwd)
+source $SCRIPT_HOME/modules
+echo "------------------------------------------"
+echo "Start : "$(date)
+echo "------------------------------------------"
+function show_options () {
+    echo "Options:"
+    echo "bootstrap <scenario>"
+    echo "**********************************************"
+    echo "             scenario options."
+    echo "**********************************************"
+    echo "SSH_FORWARD_USER    =<ssh login user> - Deprecated"
+    echo "ssh_user            =<exec user>"
+    echo "SSH_PASSWORD        =<exec user password> - Deprecated"
+    echo "verify_dir             =<exec user directory> - Deprecated"
+    
+    echo "manager_template    =<Manager Heat template file name>"
+    echo "agent_template      =<Agent Heat template file name>"
+    echo "MANAGER_CONFLICT    =<Agent Manager and conflictf> - Not implemented "
+    
+    echo "instance_type       =<nova flavor name>"
+    echo "key_name            =<nova keypair name>"
+    echo "subnet_name         =<neutron subnet name>"
+    echo "**********************************************"
+    exit 0
+}
+
+function check_flavor() {
+    FLAVORS=$(nova ${AUTH_PARAMETOR} flavor-list | grep "$1" | awk ' {print $4} ')
+    for FLAVOR in $FLAVORS; do
+        if [[ "$FLAVOR" = "$1" ]]; then
+           echo "1"
+           exit 0 
+        fi
+    done
+    echo "0"
+}
+
+#function check_keypair() {
+#    KEYS=$(nova ${AUTH_PARAMETOR} keypair-list | grep "$1" | awk ' {print $2} ')
+#    for KEY in $KEYS; do
+#        if [[ "$KEY" = "$1" ]]; then
+#           echo "1"
+#           exit 0 
+#        fi
+#    done
+#    echo "0"
+#}
+
+function get_subnet_uuid() {
+    UUID=$(neutron ${AUTH_PARAMETOR} subnet-list | grep "$1" | awk ' {print $2} ')
+    echo "$UUID"
+}
+
+STACK_ID=()
+
+function create_heat() {
+    echo " - template that booting, $5"
+   STACK_ID+=($(heat ${AUTH_PARAMETOR} stack-create $6 -f ${SCRIPT_HOME}/../templates/$5 --parameters="InstanceType=$2;KeyName=$3;ProvHost=$1;SubnetId=$4" | grep ${6} | awk '{print $2}'))
+}
+
+function get_netns() {
+    netnsid="qdhcp-$(neutron ${AUTH_PARAMETOR} net-list | grep $1 | awk '{print $2}')"
+    echo $netnsid
+}
+
+DEVICE_ID=()
+
+function get_ipaddress() {
+
+   for ID in ${STACK_ID[@]} 
+   do
+#      DEVICE_ID+=(`mysql -u ${MYSQL_PARAM[0]} -p${MYSQL_PARAM[1]} heat -N -e "select nova_instance from resource where stack_id='${ID}';"`)
+     DEVICE_ID+=($(/usr/bin/python "${SCRIPT_HOME}/db_heat_sh.py" "select" "select nova_instance from resource where stack_id='${ID}'"))
+   done
+   COUNT=0
+   for ID in ${DEVICE_ID[@]}
+   do      
+      if [ $COUNT -eq 0 ]; then
+#         MANAGER_IP=`mysql -u ${MYSQL_PARAM[0]} -p${MYSQL_PARAM[1]} ovs_quantum -N -e "select ip.ip_address from ipallocations as ip, ports as port where ip.port_id=port.id and port.device_id='${DEVICE_ID}';"`
+         MANAGER_IP=$(sudo /usr/bin/python "${SCRIPT_HOME}/db_neutron_sh.py" "select" "select ip.ip_address from ipallocations as ip, ports as port where ip.port_id=port.id and port.device_id='${DEVICE_ID}'")
+      else
+#         mysql -u ${MYSQL_PARAM[0]} -p${MYSQL_PARAM[1]} ovs_quantum -N -e "select ip.ip_address from ipallocations as ip, ports as port where ip.port_id=port.id and port.device_id='${ID}';" >> ${OUTPUT_IPADDRESS} 
+         ret=$(sudo /usr/bin/python "${SCRIPT_HOME}/db_neutron_sh.py" "select" "select ip.ip_address from ipallocations as ip, ports as port where ip.port_id=port.id and port.device_id='${ID}'")
+         echo $ret >> ${OUTPUT_IPADDRESS}
+      fi
+      let COUNT=${COUNT}+1
+   done
+}
+
+#instance_type=${1:-""}
+#key_name=${2:-""}
+#SUBNET=${3:-""}
+
+source "${SCRIPT_HOME}/../scenario/"$1 1>/dev/null 2>/dev/null
+source "${SCRIPT_HOME}/../settings/"$2 1>/dev/null 2>/dev/null
+
+SCENARIO=$1
+
+VERIFY_DIR="/usr/lib/verification"
+
+AUTH_PARAMETOR="--os-auth-url=${os_auth_url} --os-tenant-name=${os_tenant_name} --os-username=${os_username} --os-password=${os_password} "
+
+OUTPUT_IPADDRESS="${SCRIPT_HOME}/../tmp/ip-"`uuidgen | sed s/-//g | cut -c 1-10`
+
+if [ -z "$instance_type" -o -z "$key_name" -o -z "$subnet_name" ]; then
+    show_options
+fi
+
+### insert scenarios table ###
+/usr/bin/python "${SCRIPT_HOME}/db_wrapper_sh.py" "scenarios_in" "${SCENARIO}"
+##############################
+
+echo "Availability Zone check.."
+${SCRIPT_HOME}/availability_zone_create $2
+echo "Keypair check.."
+${SCRIPT_HOME}/keypair_create $key_name $2
+
+if [ "0" = `check_flavor "${instance_type}"` ]; then
+    echo "options fail."
+    exit 1
+fi
+
+HOSTS=$(sudo nova-manage service list | awk "/nova-compute/ {print \$2}")
+SUBNET_UUID=`get_subnet_uuid $subnet_name`
+COUNTER=0
+STACK_HOST=()
+
+STACK_UUID=`uuidgen | sed s/-//g | cut -c 1-2`
+
+for HOST in $HOSTS; do
+    echo "--------------------------------------------"
+    echo "Provisioning Host ($HOST)"
+    if [ $COUNTER -eq 0 ]; then
+       create_heat "az-${HOST}" $instance_type $key_name $SUBNET_UUID $manager_template "${HOST}-${SCENARIO}-mn-${STACK_UUID}"
+#       create_heat "az-${HOST}" $instance_type $key_name $SUBNET_UUID $manager_template "${HOST}-mn-${STACK_UUID}"
+       STACK_HOST+=(${HOST})
+    fi
+    sleep 1 
+    create_heat "az-${HOST}" $instance_type $key_name $SUBNET_UUID $agent_template "${HOST}-${SCENARIO}-ag-${STACK_UUID}"
+#    create_heat "az-${HOST}" $instance_type $key_name $SUBNET_UUID $agent_template "${HOST}-ag-${STACK_UUID}"
+    STACK_HOST+=(${HOST})
+    let COUNTER=${COUNTER}+1
+    echo "--------------------------------------------"
+done
+
+sleep 20 
+get_ipaddress
+NETNS_ID=`get_netns $SUBNET_UUID`
+
+COUNTER=0
+
+function send_ipaddress() {
+#   sudo ssh-keygen -f "/root/.ssh/known_hosts" -R ${MANAGER_IP}
+   echo "Transfer of App IPs information to Manager.."
+   while :
+   do
+      sudo ip netns exec ${NETNS_ID} scp -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${OUTPUT_IPADDRESS} ${ssh_user}@${MANAGER_IP}:${VERIFY_DIR}"/ipaddress.txt" >/dev/null 2>&1
+      if [ $? -eq "0" ]; then
+         echo "   : )"
+         break
+      fi
+      sleep 10
+      let COUNTER=${COUNTER}+1
+   done
+}
+
+WEBSERVER_SCRIPT="${SCRIPT_HOME}/manager/verify_server"
+
+function exec_scp() {
+   while :
+   do
+      sudo ip netns exec ${NETNS_ID} scp -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${1} ${ssh_user}@${2}:${3} >/dev/null 2>&1
+      if [ $? -eq "0" ]; then
+         echo "   : )"
+         break
+      fi
+      sleep 10
+   done
+}
+
+function send_webserver() {
+   echo "Transferred to the Virtual machine of the WebServer.."
+   exec_scp ${WEBSERVER_SCRIPT} ${MANAGER_IP} ${VERIFY_DIR}
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   for IP in ${IP_CONF[@]}
+   do
+      exec_scp ${WEBSERVER_SCRIPT} ${IP} ${VERIFY_DIR}
+   done
+}
+
+VERIFY_SERVICE_SCRIPT="${SCRIPT_HOME}/manager/etc/init.d/verify_server"
+function send_service() {
+   echo "Transferred to the Virtual machine of the WebServerService.."
+   exec_scp ${VERIFY_SERVICE_SCRIPT} ${MANAGER_IP} "/etc/init.d/"
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   for IP in ${IP_CONF[@]}
+   do
+      exec_scp ${VERIFY_SERVICE_SCRIPT} ${IP} "/etc/init.d/"
+   done
+}
+
+VERIFY_SERVICE_BIN="${SCRIPT_HOME}/manager/usr/bin/verify_server"
+function send_service_bin() {
+   echo "Transfer of WebServerBin to Virtual machine.."
+   exec_scp ${VERIFY_SERVICE_BIN} ${MANAGER_IP} "/usr/bin/"
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   for IP in ${IP_CONF[@]}
+   do
+      exec_scp ${VERIFY_SERVICE_BIN} ${IP} "/usr/bin/"
+   done
+}
+
+function exec_webservice() {
+   echo "Start WebService.."
+   sudo ip netns exec ${NETNS_ID} ssh -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${ssh_user}@${MANAGER_IP} "service verify_server start &" >/dev/null 2>&1 &
+   echo "   : )"
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   for IP in ${IP_CONF[@]}
+   do
+     sudo ip netns exec ${NETNS_ID} ssh -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${ssh_user}@${IP} "service verify_server start &" >/dev/null 2>&1 &
+   done
+}
+
+VERIFY_SERVICE_MNG_PKG="${SCRIPT_HOME}/../lib/manager/bootstrap.tar.gz"
+VERIFY_SERVICE_AG_PKG="${SCRIPT_HOME}/../lib/agent/bootstrap.tar.gz"
+function send_service_pkg() {
+   echo "Transfer of Verify-Server Package to Virtual machine.."
+   exec_scp ${VERIFY_SERVICE_MNG_PKG} ${MANAGER_IP} "/tmp/"
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   for IP in ${IP_CONF[@]}
+   do
+      exec_scp ${VERIFY_SERVICE_AG_PKG} ${IP} "/tmp/"
+   done
+}
+
+VERIFY_SERVICE_UNCOMPRESS="/bin/tar xvf /tmp/bootstrap.tar.gz -C /tmp/"
+VERIFI_SERVICE_INSTALL="/tmp/bootstrap/install.sh ${VERIFY_DIR}"
+function exec_service_install() {
+   echo "Verification Server install.."
+   sudo ip netns exec ${NETNS_ID} ssh -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${ssh_user}@${MANAGER_IP} ${VERIFY_SERVICE_UNCOMPRESS} 1>/dev/null 2>/dev/null
+   sudo ip netns exec ${NETNS_ID} ssh -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${ssh_user}@${MANAGER_IP} ${VERIFI_SERVICE_INSTALL} 1>/dev/null 2>/dev/null & 
+   echo "   : )"
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   for IP in ${IP_CONF[@]}
+   do
+     sudo ip netns exec ${NETNS_ID} ssh -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${ssh_user}@${IP} ${VERIFY_SERVICE_UNCOMPRESS} >/dev/null 2>&1
+     sudo ip netns exec ${NETNS_ID} ssh -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${key_name}.pem" ${ssh_user}@${IP} ${VERIFI_SERVICE_INSTALL} >/dev/null 2>&1 &
+     echo "   : )"
+   done
+}
+
+#### db insert ####
+function insert_stacks() {
+   COUNT=0
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   echo "Insert is Stacks.."
+   for ID in ${STACK_ID[@]}
+   do
+      HOST=${STACK_HOST[$COUNT]}
+      if [ $COUNT -eq 0 ]; then
+        /usr/bin/python "${SCRIPT_HOME}/db_wrapper_sh.py" "stacks" "${ID}" "${SCENARIO}" "${MANAGER_IP}" "${NETNS_ID}" 1 "${HOST}"
+      else
+        /usr/bin/python "${SCRIPT_HOME}/db_wrapper_sh.py" "stacks" "${ID}"  "${SCENARIO}" "${IP_CONF[$COUNT-1]}" "${NETNS_ID}" 0 "${HOST}"
+      fi
+      let COUNT=${COUNT}+1
+   done
+}
+###################
+
+send_service_pkg &
+progress
+
+sleep 1
+
+exec_service_install &
+progress
+
+sleep 1
+
+send_ipaddress &
+progress
+
+
+#### db insert ####
+insert_stacks &
+progress
+
+sleep 1
+###################
+
+### update scenarios table ###
+/usr/bin/python "${SCRIPT_HOME}/db_wrapper_sh.py" "scenarios_up" "${SCENARIO}" 1
+##############################
+
+if [ -e ${OUTPUT_IPADDRESS} ]; then
+   rm -r ${OUTPUT_IPADDRESS}
+fi
+
+echo "bootstrap end.."
+echo "------------------------------------------"
+echo "End : "$(date)
+echo "------------------------------------------"

@@ -1,0 +1,102 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "AWS CloudFormation Sample Template WordPress_Single_Instance: WordPress is web software you can use to create a beautiful website or blog. This template installs a single-instance WordPress deployment using a local MySQL database to store the data.",
+
+  "Parameters" : {
+
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "String"
+    },
+    "ProvHost" : {
+      "Type" : "String"
+    },
+    "SubnetId" : {
+      "Type" : "String",
+      "Description" : "Id of an existing subnet"
+    },
+    "InstanceType" : {
+      "Description" : "WebServer EC2 instance type",
+      "Type" : "String",
+      "Default" : "m1.small",
+      "AllowedValues" : [ "m1.tiny", "m1.small", "m1.medium", "m1.large", "m1.xlarge" ],
+      "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+
+    "LinuxDistribution": {
+      "Default": "U12",
+      "Description" : "Distribution of choice",
+      "Type": "String",
+      "AllowedValues" : [ "U12" ]
+    }
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "m1.tiny"    : { "Arch" : "32" },
+      "m1.small"    : { "Arch" : "64" },
+      "m1.medium"    : { "Arch" : "64" },
+      "m1.large"   : { "Arch" : "64" },
+      "m1.xlarge"   : { "Arch" : "64" }
+    },
+    "DistroArch2AMI": {
+      "U12"      : { "32" : "U12-x86_64-cfntools-e", "64" : "U12-x86_64-cfntools-e" }
+    }
+  },
+
+  "Resources" : {
+    "TestServer": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "services" : {
+              "sysvinit" : {
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId" : { "Fn::FindInMap" : [ "DistroArch2AMI", { "Ref" : "LinuxDistribution" },
+                          { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "InstanceType" }, "Arch" ] } ] },
+        "InstanceType"   : { "Ref" : "InstanceType" },
+        "KeyName"        : { "Ref" : "KeyName" },
+        "SubnetId" : { "Ref" : "SubnetId" },
+        "AvailabilityZone" : {"Ref": "ProvHost"},
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash -v\n",
+          "cat > /home/openstack/verification.sh <<EOF\n",
+          "#!/bin/bash\n",
+          "\n",
+          "set -e\n",
+          "\n",
+          "IPADDRESS=(\"\\$@\")\n",
+          "\n",
+          "if [ -e ./result.txt ]; then\n",
+          "   rm -r ./result.txt\n",
+          "fi\n",
+          "\n",
+          "COUNTER=0\n",
+          "for IP in \\${IPADDRESS[@]}\n",
+          "do\n",
+          "   if [ \\$COUNTER -eq 0 ]; then\n",
+          "      NOTARGET_IP=\\$IP\n",
+          "   else\n",
+          "      if [ \"\\${NOTARGET_IP}\" != \"\\${IP}\" ]; then\n",
+          "         ping -c 4 \\$IP >> ./result.txt\n",
+          "      fi\n",
+          "   fi\n",
+          "   let COUNTER=\\${COUNTER}+1\n",
+          "done\n",
+          "EOF\n",
+          "chmod +x /home/openstack/verification.sh\n"
+        ]]}}
+      }
+    }
+  },
+
+  "Outputs" : {
+  }
+}

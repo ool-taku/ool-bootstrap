@@ -1,0 +1,12 @@
+#!/bin/bash
+
+#set -e
+SCRIPT_HOME=$(cd $(dirname $0);pwd)
+
+ret=`uuidgen | sed s/-//g | cut -c 1-10`
+echo $ret 
+echo "End : "$(date)
+
+
+ADMIN=$(sed 's/[[:space:]]//g' "/etc/keystone/keystone.conf" | grep ^admin_token= | cut -d'=' -f2)
+echo $ADMIN

@@ -1,0 +1,36 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_HOME=$(cd $(dirname $0);pwd)
+
+
+function add_keypair() {
+    keypath="${SCRIPT_HOME}/../keys/${1}.pem"
+    echo "$keypath"
+    if [ -e "$keypath" ]; then
+        rm "$keypath"
+    fi
+
+    nova keypair-add "${1}" >> "$keypath"
+    chmod 600 "$keypath"
+}
+
+function check_keypair() {
+    KEYS=$(nova ${AUTH_PARAMETOR} keypair-list | grep "${1}" | awk ' {print $2} ')
+    for KEY in $KEYS; do
+        if [ "$KEY" = "$1" ]; then
+           echo "0"
+           exit 0 
+        fi
+    done
+    echo "1"
+}
+
+KEY_NAME=$1
+source "../settings/"$2 1>/dev/null 2>/dev/null
+
+AUTH_PARAMETOR="--os-auth-url=${os_auth_url} --os-tenant-name=${os_tenant_name} --os-username=${os_username} --os-password=${os_password} "
+if [ "1" = `check_keypair $KEY_NAME` ]; then
+     add_keypair $KEY_NAME
+fi

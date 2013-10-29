@@ -1,0 +1,16 @@
+# Auth
+SSH_FORWARD_USER=root
+SSH_USER=root
+SSH_PASSWORD=password110
+SSH_DIR=/home/openstack
+
+# Provisioning
+MANAGER_TEMPLATE=Ping_Instance_deb_manager.template
+AGENT_TEMPLATE=Ping_Instance_deb_agent.template
+MANAGER_CONFLICT=True
+
+# OpenStack
+INSTANCE_TYPE=m1.tiny
+KEY_NAME=key1
+SUBNET=private01-subnet
+

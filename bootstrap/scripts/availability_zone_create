@@ -1,0 +1,33 @@
+#!/bin/bash
+
+set -e
+
+function create_availability_zone() {
+    HOST=$1
+    AZ_ID=$(nova ${AUTH_PARAMETOR} aggregate-create "ag-${HOST}" "az-${HOST}" | awk " /$HOST/ {print \$2}")
+    echo "az_id (ag-$HOST $AZ_ID)"
+    nova aggregate-add-host $AZ_ID $HOST
+}
+
+function check_availability_hosts() {
+    TMP=$(nova ${AUTH_PARAMETOR} availability-zone-list | grep "az-${1}" | awk '{print $2}')
+    if [ -z "$TMP" ]; then
+       echo "1"
+       exit 0 
+    fi
+    echo "0"
+}
+
+source "../settings/"$1 1>/dev/null 2>/dev/null
+AUTH_PARAMETOR="--os-auth-url=${os_auth_url} --os-tenant-name=${os_tenant_name} --os-username=${os_username} --os-password=${os_password} "
+
+HOSTS=$(sudo nova-manage service list | awk "/nova-compute/ {print \$2}")
+for HOST in $HOSTS; do
+    echo "Loading Hosts ($HOST)"
+    if [ "1" = `check_availability_hosts $HOST` ]; then
+        create_availability_zone $HOST
+    fi
+done
+
+nova ${AUTH_PARAMETOR} aggregate-list
+nova ${AUTH_PARAMETOR} availability-zone-list

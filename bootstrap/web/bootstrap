@@ -1,0 +1,28 @@
+#!/usr/bin/env python
+# -*- coding: UTF-8 -*-
+
+import os
+import cgi
+import urlparse
+import BaseHTTPServer,CGIHTTPServer
+
+#class Handle(CGIHTTPServer.CGIHTTPRequestHandler):
+
+def main():
+   server_class = BaseHTTPServer.HTTPServer
+#   httpd = server_class(("0.0.0.0", 18001), Handle)
+   httpd = server_class(("0.0.0.0", 18000), CGIHTTPServer.CGIHTTPRequestHandler)
+   httpd.serve_forever()
+
+class Req_handle(object):
+      def __init__(self,path):
+          self.path = path
+      def url(self):
+          req_url = self.path.split("/")
+          self.reqd_url = req_url[-1]
+      def file_path(self):
+          print os.path.join(os.path.dirname(os.path.abspath(__file__)),self.reqd_url)
+
+
+if __name__ == '__main__':
+	main()

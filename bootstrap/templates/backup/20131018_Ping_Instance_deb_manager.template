@@ -1,0 +1,185 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "AWS CloudFormation Sample Template WordPress_Single_Instance: WordPress is web software you can use to create a beautiful website or blog. This template installs a single-instance WordPress deployment using a local MySQL database to store the data.",
+
+  "Parameters" : {
+
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "String"
+    },
+    "ProvHost" : {
+      "Type" : "String"
+    },
+    "SubnetId" : {
+      "Type" : "String",
+      "Description" : "Id of an existing subnet"
+    },
+    "InstanceType" : {
+      "Description" : "WebServer EC2 instance type",
+      "Type" : "String",
+      "Default" : "m1.small",
+      "AllowedValues" : [ "m1.tiny", "m1.small", "m1.medium", "m1.large", "m1.xlarge" ],
+      "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+
+    "LinuxDistribution": {
+      "Default": "U12",
+      "Description" : "Distribution of choice",
+      "Type": "String",
+      "AllowedValues" : [ "U12" ]
+    }
+  },
+
+  "Mappings" : {
+    "AWSInstanceType2Arch" : {
+      "m1.tiny"    : { "Arch" : "32" },
+      "m1.small"    : { "Arch" : "64" },
+      "m1.medium"    : { "Arch" : "64" },
+      "m1.large"   : { "Arch" : "64" },
+      "m1.xlarge"   : { "Arch" : "64" }
+    },
+    "DistroArch2AMI": {
+      "U12"      : { "32" : "U12-x86_64-cfntools-e", "64" : "U12-x86_64-cfntools-e" }
+    }
+  },
+
+  "Resources" : {
+    "TestServer": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata" : {
+        "AWS::CloudFormation::Init" : {
+          "config" : {
+            "services" : {
+              "sysvinit" : {
+              }
+            }
+          }
+        }
+      },
+      "Properties": {
+        "ImageId" : { "Fn::FindInMap" : [ "DistroArch2AMI", { "Ref" : "LinuxDistribution" },
+                          { "Fn::FindInMap" : [ "AWSInstanceType2Arch", { "Ref" : "InstanceType" }, "Arch" ] } ] },
+        "InstanceType"   : { "Ref" : "InstanceType" },
+        "KeyName"        : { "Ref" : "KeyName" },
+        "SubnetId" : { "Ref" : "SubnetId" },
+        "AvailabilityZone" : {"Ref": "ProvHost"},
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash -v\n",
+          "cat > /home/openstack/manage.sh <<EOF\n",
+          "#!/bin/bash\n",
+          "\n",
+          "set -e\n",
+          "\n",
+          "CONF=\"ipaddress.txt\"\n",
+          "IPADDRESS=(\\`cat \"\\$CONF\"\\`)\n",
+          "\n",
+          "if [ -e \"/home/openstack/result.txt\" ]; then\n",
+          "   rm -r \"/home/openstack/result.txt\"\n",
+          "fi\n",
+          "\n",
+          "for IP in \\${IPADDRESS[@]}\n",
+          "do\n",
+          "   ssh openstack@\\${IP} ./verification.sh \\${IP} \\${IPADDRESS[@]}\n",
+          "   ssh openstack@\\${IP} cat ./result.txt >> ./result.txt\n",
+          "done\n",
+          "/usr/bin/python ./cgi-bin/verify_result.py\n",
+          "EOF\n",
+          "chmod +x /home/openstack/manage.sh\n",
+          "cat > /home/openstack/manager_authentication.sh <<EOF\n",
+          "#!/bin/bash\n",
+          "\n",
+          "USER=openstack\n",
+          "PW=password110\n",
+          "SSH_DIR=\"/home/openstack\"\n",
+          "\n",
+          "CONF=\"\\${SSH_DIR}/ipaddress.txt\"\n",
+          "IPADDRESS=(\\`cat \"\\$CONF\"\\`)\n",
+          "\n",
+          "if [ ! -e \"\\${SSH_DIR}/.ssh\" ]; then\n",
+          "   mkdir \"\\${SSH_DIR}/.ssh\"\n",
+          "   chown \"\\${USER}:\\${USER}\" -R \"\\${SSH_DIR}/.ssh\"\n",
+          "fi\n",
+          "\n",
+          "ssh-keygen -N \"\" -t rsa -f \\${SSH_DIR}/.ssh/id_rsa\n",
+          "cp ${SSH_DIR}/.ssh/id_rsa* /root/.ssh/\n",
+          "chown \"\\${USER}:\\${USER}\" -R \\${SSH_DIR}/.ssh/id_*\n",
+          "\n",
+          "for HOST in \\${IPADDRESS[@]}\n",
+          "do\n",
+          "   expect -c \"\n",
+          "   set timeout 120\n",
+          "   spawn ssh-copy-id \"\\${USER}@\\${HOST}\"\n",
+          "   expect \\\"\\$USER@\\$HOST's password:\\\"\n",
+          "   send \\$PW\\r\n",
+          "   interact\n",
+          "   \"\n",
+          "done\n",
+          "EOF\n",
+          "chmod +x /home/openstack/manager_authentication.sh\n",
+          "mkdir /home/openstack/cgi-bin\n",
+          "chown -R openstack:openstack /home/openstack/cgi-bin\n",
+          "cat > /home/openstack/cgi-bin/verify.py <<EOF\n",
+          "#!/usr/bin/env python\n",
+          "\n",
+          "import subprocess\n",
+          "import os\n",
+          "\n",
+          "if not (os.path.exists(\"/home/openstack/.ssh/id_rsa\")):\n",
+          "        os.system(\"/home/openstack/manager_authentication.sh\")\n",
+          "\n",
+          "subprocess.Popen([\"/home/openstack/manage.sh\"])\n",
+          "EOF\n",
+          "chmod 755 /home/openstack/cgi-bin/verify.py\n",
+          "cat > /home/openstack/cgi-bin/verify_result.py <<EOF\n",
+          "#!/usr/bin/env python\n",
+          "\n",
+          "import os\n",
+          "import sys\n",
+          "from string import Template\n",
+          "\n",
+          "if (os.path.exists(\"/home/openstack/result.html\")):\n",
+          "        os.system(\"rm -rf /home/openstack/result.html\")\n",
+          "\n",
+          "f=open(\"/home/openstack/template/result.tmpl\")\n",
+          "data=f.read()\n",
+          "tmpl=Template(unicode(data,\"utf-8\",\"ignore\"))\n",
+          "f1=open(\"/home/openstack/result.txt\")\n",
+          "ret=\"\"\n",
+          "for line in f1:\n",
+          "    ret += line + \"<br>\"\n",  
+          "f1.close()\n",
+          "body=tmpl.substitute({\"body\":ret.encode(\"utf-8\")})\n",
+          "fw=open(\"result.html\", \"w\")\n",
+          "fw.write(body)\n",
+          "EOF\n",
+          "chmod 755 /home/openstack/cgi-bin/verify_result.py\n",
+          "mkdir /home/openstack/template\n",
+          "chown -R openstack:openstack /home/openstack/template\n",
+          "cat > /home/openstack/template/result.tmpl <<EOF\n",
+          "<html>\n",
+          "<head>\n",
+          "<meta content-type=\"text/html\" charset=\"UTF-8\">\n",
+          "<title>Bootstrap for Verification</title>\n",
+          "</head>\n",
+          "<body>\n",
+          "<div align=\"center\">\n",
+          "\\${body}\n",
+          "</div>\n",
+          "</body>\n",
+          "</html>\n",
+          "EOF\n",
+          "sudo sh -c \"echo 'StrictHostKeyChecking=no' >> /etc/ssh/ssh_config\"\n",
+          "sudo mkdir /home/openstack/.ssh\n",
+          "sudo cp -p /root/.ssh/authorized_keys /home/openstack/.ssh/authorized_keys\n",
+          "sudo chown -R openstack:openstack /home/openstack/.ssh\n",
+          "sudo service ssh restart\n"
+        ]]}}
+      }
+    }
+  },
+
+  "Outputs" : {
+  }
+}

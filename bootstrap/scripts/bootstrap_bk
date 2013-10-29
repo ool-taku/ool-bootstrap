@@ -1,0 +1,218 @@
+#!/bin/bash
+
+#set -e
+
+#SCRIPT_HOME=`dirname $0`
+SCRIPT_HOME=$(cd $(dirname $0);pwd)
+source $SCRIPT_HOME/modules
+
+function show_options () {
+    echo "Options:"
+    echo "bootstrap <configure>"
+    echo "**********************************************"
+    echo "             configure options."
+    echo "**********************************************"
+    echo "SSH_FORWARD_USER    =<ssh login user>"
+    echo "SSH_USER            =<exec user>"
+    echo "SSH_PASSWORD        =<exec user password>"
+    echo "SSH_DIR             =<exec user directory>"
+    
+    echo "MANAGER_TEMPLATE    =<Manager Heat template file name>"
+    echo "AGENT_TEMPLATE      =<Agent Heat template file name>"
+    echo "MANAGER_CONFLICT    =<Agent Manager and conflictf>"
+    
+    echo "INSTANCE_TYPE       =<nova flavor name>"
+    echo "KEY_NAME            =<nova keypair name>"
+    echo "SUBNET              =<neutron subnet name>"
+    echo "**********************************************"
+    exit 0
+}
+
+function check_flavor() {
+    FLAVORS=$(nova flavor-list | grep "$1" | awk ' {print $4} ')
+    for FLAVOR in $FLAVORS; do
+        if [[ "$FLAVOR" = "$1" ]]; then
+           echo "1"
+           exit 0 
+        fi
+    done
+    echo "0"
+}
+
+function check_keypair() {
+    KEYS=$(nova keypair-list | grep "$1" | awk ' {print $2} ')
+    for KEY in $KEYS; do
+        if [[ "$KEY" = "$1" ]]; then
+           echo "1"
+           exit 0 
+        fi
+    done
+    echo "0"
+}
+
+function get_subnet_uuid() {
+    UUID=$(neutron subnet-list | grep "$1" | awk ' {print $2} ')
+    echo "$UUID"
+}
+
+STACK_ID=()
+
+function create_heat() {
+   STACK_ID+=($(heat stack-create $6 -f ${SCRIPT_HOME}/../templates/$5 --parameters="InstanceType=$2;KeyName=$3;ProvHost=$1;SubnetId=$4" | grep ${6} | awk '{print $2}'))
+#   echo "InstanceType=$2;KeyName=$3;ProvHost=$1;SubnetId=$4;Template=$5"
+    echo "template that booting, $5"
+}
+
+function get_netns() {
+    netnsid="qdhcp-$(neutron net-list | grep $1 | awk '{print $2}')"
+    echo $netnsid
+}
+
+DEVICE_ID=()
+
+function get_ipaddress() {
+   CONF="${SCRIPT_HOME}/../configure/mysql.conf"  # 0:id 1:pass
+   MYSQL_PARAM=(`cat "$CONF"`)
+   
+   if [ -e ${OUTPUT_IPADDRESS} ]; then
+      rm -r ${OUTPUT_IPADDRESS}
+   fi
+
+   for ID in ${STACK_ID[@]} 
+   do
+      DEVICE_ID+=(`mysql -u ${MYSQL_PARAM[0]} -p${MYSQL_PARAM[1]} heat -N -e "select nova_instance from resource where stack_id='${ID}';"`)
+   done
+   COUNT=0
+   for ID in ${DEVICE_ID[@]}
+   do      
+      if [ $COUNT -eq 0 ]; then
+         MANAGER_IP=`mysql -u ${MYSQL_PARAM[0]} -p${MYSQL_PARAM[1]} ovs_quantum -N -e "select ip.ip_address from ipallocations as ip, ports as port where ip.port_id=port.id and port.device_id='${DEVICE_ID}';"`
+      else
+         mysql -u ${MYSQL_PARAM[0]} -p${MYSQL_PARAM[1]} ovs_quantum -N -e "select ip.ip_address from ipallocations as ip, ports as port where ip.port_id=port.id and port.device_id='${ID}';" >> ${OUTPUT_IPADDRESS} 
+      fi
+      let COUNT=${COUNT}+1
+   done
+}
+
+#INSTANCE_TYPE=${1:-""}
+#KEY_NAME=${2:-""}
+#SUBNET=${3:-""}
+
+source $1
+
+OUTPUT_IPADDRESS="${SCRIPT_HOME}/../tmp/ipaddress.txt"
+
+if [ -z "$INSTANCE_TYPE" -o -z "$KEY_NAME" -o -z "$SUBNET" ]; then
+    show_options
+fi
+
+${SCRIPT_HOME}/availability_zone_create
+${SCRIPT_HOME}/keypair_create $KEY_NAME
+
+if [ "0" = `check_flavor "${INSTANCE_TYPE}"` ]; then
+    echo "options fail."
+    exit 1
+fi
+
+HOSTS=$(sudo nova-manage service list | awk "/nova-compute/ {print \$2}")
+SUBNET_UUID=`get_subnet_uuid $SUBNET`
+COUNTER=0
+
+for HOST in $HOSTS; do
+    echo "Provisioning Host ($HOST)"
+    if [ $COUNTER -eq 0 ]; then
+       create_heat "az-${HOST}" $INSTANCE_TYPE $KEY_NAME $SUBNET_UUID $MANAGER_TEMPLATE "${HOST}-mn"
+    fi
+    create_heat "az-${HOST}" $INSTANCE_TYPE $KEY_NAME $SUBNET_UUID $AGENT_TEMPLATE "${HOST}-ag"
+    
+    let COUNTER=${COUNTER}+1
+done
+
+sleep 10
+get_ipaddress
+NETNS_ID=`get_netns $SUBNET_UUID`
+
+COUNTER=0
+
+function send_ipaddress() {
+#   sudo ssh-keygen -f "/root/.ssh/known_hosts" -R ${MANAGER_IP}
+   echo "Transfer of App IPs information to Manager.."
+   while :
+   do
+      sudo ip netns exec ${NETNS_ID} scp -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${KEY_NAME}.pem" ${OUTPUT_IPADDRESS} ${SSH_FORWARD_USER}@${MANAGER_IP}:${SSH_DIR} >/dev/null 2>&1
+      if [ $? -eq "0" ]; then
+         echo "   : )"
+         break
+      fi
+      sleep 10
+      let COUNTER=${COUNTER}+1
+   done
+}
+
+AUTH_SCRIPT="${SCRIPT_HOME}/manager_authentication.sh"
+function send_authscript() {
+   echo "Transferred to the Manager of the shell RSA key.."
+   while :
+   do
+      sudo ip netns exec ${NETNS_ID} scp -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${KEY_NAME}.pem" ${AUTH_SCRIPT} ${SSH_FORWARD_USER}@${MANAGER_IP}:${SSH_DIR} >/dev/null 2>&1
+      if [ $? -eq "0" ]; then
+         echo "   : )"
+         break
+      fi
+      sleep 10
+   done
+}
+
+function exec_auth() {
+   echo "Replace start an RSA key between applications.."
+   sudo ip netns exec ${NETNS_ID} ssh -oStrictHostKeyChecking=no -i "${SCRIPT_HOME}/../keys/${KEY_NAME}.pem" ${SSH_FORWARD_USER}@${MANAGER_IP} ${SSH_DIR}/manager_authentication.sh >/dev/null 2>&1
+   echo "   : )"
+}
+
+#### db insert ####
+function insert_stacks() {
+   COUNT=0
+   CONF="${OUTPUT_IPADDRESS}"
+   IP_CONF=(`cat "$CONF"`)
+   echo "Insert is Stack.."
+   for ID in ${STACK_ID[@]}
+   do
+      if [ $COUNT -eq 0 ]; then
+        /usr/bin/python "${SCRIPT_HOME}/db_wrapper_sh.py" "stacks" "${ID}"  "ping" "${MANAGER_IP}" "${NETNS_ID}" 1
+      else
+        /usr/bin/python "${SCRIPT_HOME}/db_wrapper_sh.py" "stacks" "${ID}"  "ping" "${IP_CONF[$COUNT-1]}" "${NETNS_ID}" 0
+      fi
+      let COUNT=${COUNT}+1
+   done
+   /usr/bin/python "${SCRIPT_HOME}/db_wrapper_sh.py" "scenarios_in" "ping" 
+}
+###################
+
+#echo "ManagerIP : ${MANAGER_IP}"
+
+send_ipaddress &
+progress
+
+sleep 1
+
+send_authscript &
+progress
+
+sleep 1
+
+exec_auth &
+progress
+
+sleep 1
+
+#### db insert ####
+insert_stacks &
+progress
+
+sleep 1
+###################
+
+
+echo "bootstrap end.."
+
+#echo $COUNTER
