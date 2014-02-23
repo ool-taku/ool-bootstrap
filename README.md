@@ -59,7 +59,28 @@ Sample codes　are stored in a folder the following .
 
 Configuration environment
 -----------------------
-Maybe later...
+
+Basic architecture：
+
+        +---------------+                                                  
+        |Controller Node|                                                  
+        | - Neutron     |                                                  
+        | - Nova        |         +---------------+   +---------------+    
+        | - Heat        |         | Compute Node  |   | Compute Node  |    
+        | - Glance      |         | - Nova        |   | - nova-compute|    
+        | - Bootstrap   |         | - Neutron     |   | - *-plugin    |    
+        +---------------+         +---------------+   +---------------+    
+                |                         |                   |            
+                +-----------+-------------+-------------------+            
+                            |                                              
+                      +-----+-----+                                        
+                      |  SDN Box  |                                        
+                      +-----------+                                        
+
+Test architecture:
+
+ Maybe later...
+
 
 Notes
 -----------------------
